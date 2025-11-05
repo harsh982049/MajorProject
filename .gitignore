@@ -1,0 +1,39 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+
+# --- Virtual Environments ---
+.env/
+.venv/
+env/
+venv/
+*/Python_env_311/
+
+# --- Flask / Django / Logs ---
+*.log
+*.sqlite3
+*.db
+*.bak
+*.tmp
+
+# --- CSV Files (can adjust later if some are needed) ---
+*.csv
+
+# --- Node / Frontend ---
+node_modules/
+dist/
+build/
+
+# --- IDE ---
+.vscode/
+.idea/
+
+# --- OS Junk ---
+.DS_Store
+Thumbs.db
+
+# --- Git ---
+backend/export/face_emotion_pt.onnx
+backend/best_model.pth

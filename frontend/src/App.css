@@ -1,0 +1,118 @@
+Set a global light-colored background
+body {
+  background-color: #f9f9fb; /* Light neutral background */
+  font-family: 'Inter', sans-serif;
+  color: #333;
+  margin: 0;
+  padding: 0;
+}
+
+/* Ensure the main container has proper spacing */
+#root {
+  max-width: 1280px;
+  margin: 0 auto;
+  /* padding: 0rem 3rem;  */
+  text-align: center;
+}
+
+/* Navbar fixes: Ensure it doesn't blend with the background */
+header {
+  background: #ffffff;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.05);
+  padding: 1rem 0;
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+
+/* Ensure page content is well spaced */
+main {
+  padding: 2rem 4rem;
+}
+
+/* Add some global card styling for consistent UI */
+.card {
+  background: white;
+  padding: 1.5rem;
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+  transition: transform 0.2s ease-in-out;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+}
+
+/* Improve text readability */
+p {
+  font-size: 1rem;
+  line-height: 1.6;
+  color: #555;
+}
+
+/* Buttons: Add a soft hover effect */
+button {
+  cursor: pointer;
+  transition: all 0.2s ease-in-out;
+}
+
+button:hover {
+  opacity: 0.9;
+}
+
+/* Responsive adjustments */
+@media (max-width: 1024px) {
+  #root {
+    padding: 2rem;
+  }
+
+  main {
+    padding: 2rem;
+  }
+}
+
+@media (max-width: 768px) {
+  #root {
+    padding: 1.5rem;
+  }
+
+  main {
+    padding: 1.5rem;
+  }
+}
+
+/* Logo styling */
+.logo {
+  height: 6em;
+  padding: 1.5em;
+  will-change: filter;
+  transition: filter 300ms;
+}
+.logo:hover {
+  filter: drop-shadow(0 0 2em #646cffaa);
+}
+.logo.react:hover {
+  filter: drop-shadow(0 0 2em #61dafbaa);
+}
+
+/* Animation */
+@keyframes logo-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  a:nth-of-type(2) .logo {
+    animation: logo-spin infinite 20s linear;
+  }
+}
+
+/* Additional styles for general elements */
+.read-the-docs {
+  color: #888;
+  font-size: 0.9rem;
+}
