@@ -12,7 +12,7 @@ from services.stress_behavior_service import (
     init_service as behavior_init_service,
     health_check as behavior_health_check,
     predict_from_row as behavior_predict_from_row,
-    train_user_calibrator as behavior_train_user_calibrator,
+    # train_user_calibrator as behavior_train_user_calibrator,
     latest_window_features as behavior_latest_window_features
 )
 
@@ -129,21 +129,21 @@ def stress_behavior_predict():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
-@app.route("/api/stress/behavior/calibrate", methods=["POST"])
-@jwt_required(optional=True)
-def stress_behavior_calibrate():
-    """
-    Fits a per-user Platt calibrator from labels/stress_30s.csv.
-    Body JSON: { "user_id": "harsh", "min_rows": 200 }  # both optional
-    """
-    try:
-        body = request.get_json(silent=True) or {}
-        user_id = str(body.get("user_id") or (get_jwt_identity() or "harsh"))
-        min_rows = int(body.get("min_rows") or 200)
-        path = behavior_train_user_calibrator(user_id=user_id, min_rows=min_rows)
-        return jsonify({"ok": True, "user_id": user_id, "calibrator_path": path}), 200
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
+# @app.route("/api/stress/behavior/calibrate", methods=["POST"])
+# @jwt_required(optional=True)
+# def stress_behavior_calibrate():
+#     """
+#     Fits a per-user Platt calibrator from labels/stress_30s.csv.
+#     Body JSON: { "user_id": "harsh", "min_rows": 200 }  # both optional
+#     """
+#     try:
+#         body = request.get_json(silent=True) or {}
+#         user_id = str(body.get("user_id") or (get_jwt_identity() or "harsh"))
+#         min_rows = int(body.get("min_rows") or 200)
+#         path = behavior_train_user_calibrator(user_id=user_id, min_rows=min_rows)
+#         return jsonify({"ok": True, "user_id": user_id, "calibrator_path": path}), 200
+#     except Exception as e:
+#         return jsonify({"ok": False, "error": str(e)}), 400
     
 @app.route("/api/stress/behavior/latest-window", methods=["GET"])
 @jwt_required(optional=True)

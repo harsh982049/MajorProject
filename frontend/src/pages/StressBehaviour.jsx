@@ -28,52 +28,45 @@ function pct(n) { return Math.round(Number(n || 0) * 100) }
 function statusFor(p) { const v = Number(p || 0); if (v > 0.6) return { label: "High", variant: "destructive" }; if (v >= 0.4) return { label: "Elevated", variant: "secondary" }; return { label: "Calm", variant: "default" } }
 function quantile(arr, q) { if (!arr?.length) return 0; const a = [...arr].sort((x,y)=>x-y); const pos=(a.length-1)*q; const b=Math.floor(pos); const r=pos-b; return a[b+1]!==undefined ? a[b] + r*(a[b+1]-a[b]) : a[b] }
 
-// =============== TRACKER HOOK (17 features) + DEBUG ===============
+// ================= TRACKER =================
 function useBehaviorTracker(enabled, setDebug) {
   const ref = useRef({
-    // keyboard
-    keydowns: 0,
-    keyups: 0,
-    eventCount: 0,
-    uniqueKeys: new Set(),
-    downTimes: new Map(),     // code -> t
-    dwellMs: [],
-    keydownTimes: [],
-    ikgMs: [],
-    lastKey: "",
+    // keyboard aggregates
+    keydowns: 0, keyups: 0, eventCount: 0,
+    uniqueKeys: new Set(), downTimes: new Map(),
+    dwellMs: [], keydownTimes: [], ikgMs: [], lastKey: "",
 
-    // mouse
-    moveCount: 0,
-    clickCount: 0,
-    scrollCount: 0,
-    lastMouse: null,          // {x,y,t}
-    totalDist: 0,
-    speeds: [],
-    maxSpeed: 0,
+    // keyboard raw presses (for backend key_seq)
+    keyPresses: [], // array of { down_ts, up_ts?, code }
+
+    // mouse aggregates
+    moveCount: 0, clickCount: 0, scrollCount: 0,
+    lastMouse: null, totalDist: 0, speeds: [], maxSpeed: 0,
+
+    // mouse raw events (for backend mouse_seq)
+    mouseEvents: [], // array of [t_ms, x, y, type]  type: 0 move, 1 click, 2 scroll
 
     // activity
     activeSeconds: new Set(),
-
     windowStart: performance.now(),
   })
 
-  const markActive = () => { ref.current.activeSeconds.add(Math.floor(Date.now() / 1000)) }
+  const nowMs = () => performance.now()
+
+  const markActive = () => {
+    ref.current.activeSeconds.add(Math.floor(Date.now() / 1000))
+  }
 
   const resetWindow = useCallback(() => {
     const now = performance.now()
     Object.assign(ref.current, {
       keydowns: 0, keyups: 0, eventCount: 0,
-      uniqueKeys: new Set(),
-      downTimes: new Map(),
-      dwellMs: [],
-      keydownTimes: [],
-      ikgMs: [],
-      lastKey: "",
+      uniqueKeys: new Set(), downTimes: new Map(),
+      dwellMs: [], keydownTimes: [], ikgMs: [], lastKey: "",
+      keyPresses: [],
       moveCount: 0, clickCount: 0, scrollCount: 0,
-      lastMouse: null,
-      totalDist: 0,
-      speeds: [],
-      maxSpeed: 0,
+      lastMouse: null, totalDist: 0, speeds: [], maxSpeed: 0,
+      mouseEvents: [],
       activeSeconds: new Set(),
       windowStart: now,
     })
@@ -84,16 +77,13 @@ function useBehaviorTracker(enabled, setDebug) {
     const s = ref.current
     setDebug?.((d)=>({
       ...d,
-      kd: s.keydowns,
-      ku: s.keyups,
-      moves: s.moveCount,
-      clicks: s.clickCount,
-      scrolls: s.scrollCount,
+      kd: s.keydowns, ku: s.keyups,
+      moves: s.moveCount, clicks: s.clickCount, scrolls: s.scrollCount,
       lastKey: s.lastKey
     }))
   }
 
-  // KEYBOARD — listen on BOTH document (capture) and window (bubble)
+  // ----- KEYBOARD (document capture + window bubble)
   const onKeyDownDoc = useCallback((e) => {
     if (!enabled) return
     const s = ref.current
@@ -102,14 +92,22 @@ function useBehaviorTracker(enabled, setDebug) {
     const code = e.code || e.key || "Unknown"
     s.lastKey = `↓ ${code}`
     s.uniqueKeys.add(code)
-    const now = performance.now()
+    const t = nowMs()
+
+    // aggregate gaps
     const lastKd = s.keydownTimes.length ? s.keydownTimes[s.keydownTimes.length - 1] : null
     if (lastKd != null) {
-      const gap = now - lastKd
+      const gap = t - lastKd
       if (gap >= 0 && isFinite(gap)) s.ikgMs.push(gap)
     }
-    s.keydownTimes.push(now)
-    if (!s.downTimes.has(code)) s.downTimes.set(code, now)
+    s.keydownTimes.push(t)
+
+    // record a press object (one per keydown)
+    s.keyPresses.push({ down_ts: t, up_ts: null, code })
+
+    // for dwell
+    if (!s.downTimes.has(code)) s.downTimes.set(code, t)
+
     markActive()
     updateDebug()
   }, [enabled])
@@ -122,11 +120,21 @@ function useBehaviorTracker(enabled, setDebug) {
     const code = e.code || e.key || "Unknown"
     s.lastKey = `↑ ${code}`
     const t0 = s.downTimes.get(code)
+    const t1 = nowMs()
+
+    // dwell aggregate
     if (typeof t0 === "number") {
-      const dwell = performance.now() - t0
+      const dwell = t1 - t0
       if (dwell >= 0 && isFinite(dwell)) s.dwellMs.push(dwell)
       s.downTimes.delete(code)
     }
+
+    // close the latest open press of same code (best-effort)
+    for (let i = s.keyPresses.length - 1; i >= 0; i--) {
+      const p = s.keyPresses[i]
+      if (p.up_ts == null && p.code === code) { p.up_ts = t1; break }
+    }
+
     markActive()
     updateDebug()
   }, [enabled])
@@ -134,19 +142,23 @@ function useBehaviorTracker(enabled, setDebug) {
   const onKeyDownWin = useCallback((e)=>onKeyDownDoc(e), [onKeyDownDoc])
   const onKeyUpWin   = useCallback((e)=>onKeyUpDoc(e), [onKeyUpDoc])
 
-  // MOUSE
+  // ----- MOUSE
   const onMouseMove = useCallback((e) => {
     if (!enabled) return
     const s = ref.current
-    const now = performance.now()
+    const t = nowMs()
     const last = s.lastMouse
+
+    // raw event
+    s.mouseEvents.push([t, e.clientX, e.clientY, 0])
+
     if (last) {
       const dx = e.clientX - last.x
       const dy = e.clientY - last.y
       const dist = Math.hypot(dx, dy)
-      if (dist < 2) return // jitter guard
+      if (dist < 2) { s.lastMouse = { x: e.clientX, y: e.clientY, t }; return } // jitter guard
       s.moveCount += 1
-      const dt = (now - last.t) / 1000
+      const dt = (t - last.t) / 1000
       if (isFinite(dist)) s.totalDist += dist
       if (dt > 0 && isFinite(dist)) {
         const speed = dist / dt
@@ -158,37 +170,38 @@ function useBehaviorTracker(enabled, setDebug) {
     } else {
       s.moveCount += 1
     }
-    s.lastMouse = { x: e.clientX, y: e.clientY, t: now }
+
+    s.lastMouse = { x: e.clientX, y: e.clientY, t }
     markActive()
     updateDebug()
   }, [enabled])
 
-  const onMouseDown = useCallback(() => {
+  const onMouseDown = useCallback((e) => {
     if (!enabled) return
-    ref.current.clickCount += 1
-    markActive()
-    updateDebug()
+    const s = ref.current
+    s.clickCount += 1
+    s.mouseEvents.push([nowMs(), e.clientX, e.clientY, 1])
+    markActive(); updateDebug()
   }, [enabled])
 
-  const onWheel = useCallback(() => {
+  const onWheel = useCallback((e) => {
     if (!enabled) return
-    ref.current.scrollCount += 1
-    markActive()
-    updateDebug()
+    const s = ref.current
+    s.scrollCount += 1
+    s.mouseEvents.push([nowMs(), e.clientX ?? 0, e.clientY ?? 0, 2])
+    markActive(); updateDebug()
   }, [enabled])
 
-  // Attach listeners (document capture + window bubble)
+  // Attach listeners
   useEffect(() => {
     if (!enabled) return
     resetWindow()
 
-    // keyboard
     document.addEventListener("keydown", onKeyDownDoc, { capture: true })
     document.addEventListener("keyup", onKeyUpDoc, { capture: true })
     window.addEventListener("keydown", onKeyDownWin)
     window.addEventListener("keyup", onKeyUpWin)
 
-    // mouse
     window.addEventListener("mousemove", onMouseMove, { passive: true })
     document.addEventListener("mousedown", onMouseDown, { capture: true })
     document.addEventListener("wheel", onWheel, { capture: true })
@@ -204,11 +217,12 @@ function useBehaviorTracker(enabled, setDebug) {
     }
   }, [enabled, onKeyDownDoc, onKeyUpDoc, onKeyDownWin, onKeyUpWin, onMouseMove, onMouseDown, onWheel, resetWindow])
 
+  // ---------- build payload ----------
   const snapshotFeatures = useCallback(() => {
     const s = ref.current
     const now = performance.now()
-    const elapsedS = Math.max(0.001, (now - s.windowStart) / 1000)
 
+    // aggregates → 17 features
     const ks_mean_dwell_ms = s.dwellMs.length ? s.dwellMs.reduce((a,b)=>a+b,0) / s.dwellMs.length : 0
     const ks_median_dwell_ms = quantile(s.dwellMs, 0.5)
     const ks_p95_dwell_ms = quantile(s.dwellMs, 0.95)
@@ -221,6 +235,19 @@ function useBehaviorTracker(enabled, setDebug) {
     const mouse_max_speed_px_s = s.maxSpeed
 
     const active_seconds_fraction = Math.min(1, s.activeSeconds.size / 30)
+
+    // key_events: fill next_down_ts
+    const key_events = s.keyPresses
+      .filter(p => p.down_ts != null)            // valid presses
+      .map(p => ({ down_ts: p.down_ts, up_ts: p.up_ts ?? p.down_ts }))
+
+    for (let i = 0; i < key_events.length; i++) {
+      const nd = (i + 1 < key_events.length) ? key_events[i + 1].down_ts : key_events[i].up_ts
+      key_events[i].next_down_ts = nd
+    }
+
+    // mouse_events: copy the list
+    const mouse_events = s.mouseEvents.slice()
 
     return {
       ks_event_count: s.eventCount,
@@ -240,6 +267,10 @@ function useBehaviorTracker(enabled, setDebug) {
       mouse_mean_speed_px_s,
       mouse_max_speed_px_s,
       active_seconds_fraction: Number(active_seconds_fraction.toFixed(3)),
+
+      // NEW: sequences for encoders
+      key_events,
+      mouse_events,
     }
   }, [])
 
@@ -254,11 +285,8 @@ export default function StressBehaviour() {
   const [tracking, setTracking] = useState(() => { try { return JSON.parse(localStorage.getItem(LS_TRACK) || "true") } catch { return true } })
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState("")
-
-  // focus/debug states
   const [hasFocus, setHasFocus] = useState(() => document.hasFocus())
   const [debug, setDebug] = useState({ kd:0, ku:0, moves:0, clicks:0, scrolls:0, lastKey:"" })
-
   const sendTickRef = useRef(null)
 
   const { snapshotFeatures, resetWindow } = useBehaviorTracker(tracking, setDebug)
@@ -267,7 +295,6 @@ export default function StressBehaviour() {
   useEffect(() => { localStorage.setItem(LS_AUTO, JSON.stringify(auto)) }, [auto])
   useEffect(() => { localStorage.setItem(LS_TRACK, JSON.stringify(tracking)) }, [tracking])
 
-  // focus listeners
   useEffect(() => {
     const onFocus = () => setHasFocus(true)
     const onBlur = () => setHasFocus(false)
@@ -318,7 +345,6 @@ export default function StressBehaviour() {
     }
   }, [snapshotFeatures])
 
-  // Single 30s sender
   useEffect(() => {
     if (sendTickRef.current) clearInterval(sendTickRef.current)
     if (!tracking) return
@@ -339,10 +365,10 @@ export default function StressBehaviour() {
     return arr
   }, [windows])
 
+
   return (
     <>
       <Navbar />
-
       <div className="container mx-auto px-4 py-8 max-w-6xl">
         {/* Focus notice */}
         <div className="mb-4 flex items-center gap-2">
@@ -379,7 +405,23 @@ export default function StressBehaviour() {
             <div className="flex items-center gap-3 flex-wrap">
               <div className="flex items-center gap-2">
                 <Label htmlFor="track" className="text-sm">Tracking</Label>
-                <Switch id="track" checked={tracking} onCheckedChange={setTracking} />
+                <Switch id="track"
+                  checked={tracking}
+                  onCheckedChange={setTracking}
+                  tabIndex={-1}
+                  onKeyDown={(e) => {
+                    if (e.code === "Space" || e.key === " ") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                    }
+                  }}
+                  onKeyUp={(e) => {
+                    if (e.code === "Space" || e.key === " ") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                    }
+                  }}
+                />
                 <Button size="sm" variant={tracking ? "outline" : "default"} onClick={() => setTracking(t => !t)}>
                   {tracking ? <><Pause className="h-4 w-4 mr-1" /> Stop</> : <><Play className="h-4 w-4 mr-1" /> Start</>}
                 </Button>
