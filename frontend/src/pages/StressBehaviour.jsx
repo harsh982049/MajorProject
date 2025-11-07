@@ -19,7 +19,10 @@ import { ResponsiveContainer, LineChart, Line, YAxis, XAxis, Tooltip as RTooltip
 // icons
 import { Activity, RefreshCw, AlertTriangle, Play, Pause, Keyboard } from "lucide-react"
 
-const WINDOW_MS = 30_000
+// ==== NEW: 10s window with 5s stride ====
+const WINDOW_MS = 10_000
+const STEP_MS = 5_000
+
 const LS_WINDOWS = "stress-behavior:windows"
 const LS_AUTO = "stress-behavior:auto"
 const LS_TRACK = "stress-behavior:track"
@@ -31,105 +34,78 @@ function quantile(arr, q) { if (!arr?.length) return 0; const a = [...arr].sort(
 // ================= TRACKER =================
 function useBehaviorTracker(enabled, setDebug) {
   const ref = useRef({
-    // keyboard aggregates
-    keydowns: 0, keyups: 0, eventCount: 0,
-    uniqueKeys: new Set(), downTimes: new Map(),
-    dwellMs: [], keydownTimes: [], ikgMs: [], lastKey: "",
+    // keyboard raw presses (timestamps are performance.now() ms)
+    keyPresses: [], // { down_ts, up_ts?, code }
+    keydowns_times: [], // for ikg in-window computation
 
-    // keyboard raw presses (for backend key_seq)
-    keyPresses: [], // array of { down_ts, up_ts?, code }
+    // mouse raw events
+    mouseEvents: [], // [t_ms, x, y, type] type: 0 move, 1 click, 2 scroll
+    lastMouse: null,
 
-    // mouse aggregates
-    moveCount: 0, clickCount: 0, scrollCount: 0,
-    lastMouse: null, totalDist: 0, speeds: [], maxSpeed: 0,
-
-    // mouse raw events (for backend mouse_seq)
-    mouseEvents: [], // array of [t_ms, x, y, type]  type: 0 move, 1 click, 2 scroll
-
-    // activity
+    // “activity seconds” set (epoch seconds)
     activeSeconds: new Set(),
-    windowStart: performance.now(),
+
+    // last debug snapshot
+    lastKey: "",
+    // jitter guard
+    jitterPx: 2,
   })
 
-  const nowMs = () => performance.now()
+  const nowPerf = () => performance.now()
+  const nowEpochSec = () => Math.floor(Date.now() / 1000)
 
   const markActive = () => {
-    ref.current.activeSeconds.add(Math.floor(Date.now() / 1000))
+    ref.current.activeSeconds.add(nowEpochSec())
   }
-
-  const resetWindow = useCallback(() => {
-    const now = performance.now()
-    Object.assign(ref.current, {
-      keydowns: 0, keyups: 0, eventCount: 0,
-      uniqueKeys: new Set(), downTimes: new Map(),
-      dwellMs: [], keydownTimes: [], ikgMs: [], lastKey: "",
-      keyPresses: [],
-      moveCount: 0, clickCount: 0, scrollCount: 0,
-      lastMouse: null, totalDist: 0, speeds: [], maxSpeed: 0,
-      mouseEvents: [],
-      activeSeconds: new Set(),
-      windowStart: now,
-    })
-    setDebug?.((d)=>({ ...d, lastKey: "", kd:0, ku:0, moves:0, clicks:0, scrolls:0 }))
-  }, [setDebug])
 
   const updateDebug = () => {
-    const s = ref.current
-    setDebug?.((d)=>({
-      ...d,
-      kd: s.keydowns, ku: s.keyups,
-      moves: s.moveCount, clicks: s.clickCount, scrolls: s.scrollCount,
-      lastKey: s.lastKey
-    }))
+    const { keyPresses, mouseEvents, lastKey } = ref.current
+    const kd = keyPresses.length
+    const ku = keyPresses.filter(p => p.up_ts != null).length
+    const moves = mouseEvents.filter(e => e[3] === 0).length
+    const clicks = mouseEvents.filter(e => e[3] === 1).length
+    const scrolls = mouseEvents.filter(e => e[3] === 2).length
+    setDebug?.((d)=>({ ...d, kd, ku, moves, clicks, scrolls, lastKey }))
   }
 
-  // ----- KEYBOARD (document capture + window bubble)
+  // prune everything older than WINDOW_MS + small buffer
+  const pruneOld = useCallback((now) => {
+    const cutoff = now - WINDOW_MS - 500 // 0.5s buffer
+    const s = ref.current
+    s.keyPresses = s.keyPresses.filter(p => (p.down_ts >= cutoff) || (p.up_ts != null && p.up_ts >= cutoff))
+    s.keydowns_times = s.keydowns_times.filter(t => t >= cutoff)
+    s.mouseEvents = s.mouseEvents.filter(ev => ev[0] >= cutoff)
+
+    // keep only seconds in the last window
+    const epochCut = nowEpochSec() - Math.ceil(WINDOW_MS / 1000)
+    s.activeSeconds = new Set([...s.activeSeconds].filter(sec => sec >= epochCut))
+  }, [])
+
+  // ----- KEYBOARD
   const onKeyDownDoc = useCallback((e) => {
     if (!enabled) return
     const s = ref.current
-    s.eventCount += 1
-    s.keydowns += 1
     const code = e.code || e.key || "Unknown"
     s.lastKey = `↓ ${code}`
-    s.uniqueKeys.add(code)
-    const t = nowMs()
+    const t = nowPerf()
 
-    // aggregate gaps
-    const lastKd = s.keydownTimes.length ? s.keydownTimes[s.keydownTimes.length - 1] : null
-    if (lastKd != null) {
-      const gap = t - lastKd
-      if (gap >= 0 && isFinite(gap)) s.ikgMs.push(gap)
-    }
-    s.keydownTimes.push(t)
-
-    // record a press object (one per keydown)
+    // record press
     s.keyPresses.push({ down_ts: t, up_ts: null, code })
-
-    // for dwell
-    if (!s.downTimes.has(code)) s.downTimes.set(code, t)
+    s.keydowns_times.push(t)
 
     markActive()
     updateDebug()
-  }, [enabled])
+    pruneOld(t)
+  }, [enabled, pruneOld])
 
   const onKeyUpDoc = useCallback((e) => {
     if (!enabled) return
     const s = ref.current
-    s.eventCount += 1
-    s.keyups += 1
     const code = e.code || e.key || "Unknown"
     s.lastKey = `↑ ${code}`
-    const t0 = s.downTimes.get(code)
-    const t1 = nowMs()
+    const t1 = nowPerf()
 
-    // dwell aggregate
-    if (typeof t0 === "number") {
-      const dwell = t1 - t0
-      if (dwell >= 0 && isFinite(dwell)) s.dwellMs.push(dwell)
-      s.downTimes.delete(code)
-    }
-
-    // close the latest open press of same code (best-effort)
+    // close latest open press of same code
     for (let i = s.keyPresses.length - 1; i >= 0; i--) {
       const p = s.keyPresses[i]
       if (p.up_ts == null && p.code === code) { p.up_ts = t1; break }
@@ -137,7 +113,8 @@ function useBehaviorTracker(enabled, setDebug) {
 
     markActive()
     updateDebug()
-  }, [enabled])
+    pruneOld(t1)
+  }, [enabled, pruneOld])
 
   const onKeyDownWin = useCallback((e)=>onKeyDownDoc(e), [onKeyDownDoc])
   const onKeyUpWin   = useCallback((e)=>onKeyUpDoc(e), [onKeyUpDoc])
@@ -146,56 +123,38 @@ function useBehaviorTracker(enabled, setDebug) {
   const onMouseMove = useCallback((e) => {
     if (!enabled) return
     const s = ref.current
-    const t = nowMs()
-    const last = s.lastMouse
+    const t = nowPerf()
 
     // raw event
     s.mouseEvents.push([t, e.clientX, e.clientY, 0])
 
-    if (last) {
-      const dx = e.clientX - last.x
-      const dy = e.clientY - last.y
-      const dist = Math.hypot(dx, dy)
-      if (dist < 2) { s.lastMouse = { x: e.clientX, y: e.clientY, t }; return } // jitter guard
-      s.moveCount += 1
-      const dt = (t - last.t) / 1000
-      if (isFinite(dist)) s.totalDist += dist
-      if (dt > 0 && isFinite(dist)) {
-        const speed = dist / dt
-        if (isFinite(speed)) {
-          s.speeds.push(speed)
-          if (speed > s.maxSpeed) s.maxSpeed = speed
-        }
-      }
-    } else {
-      s.moveCount += 1
-    }
-
+    // jitter guard state (just for next move dist calc)
     s.lastMouse = { x: e.clientX, y: e.clientY, t }
+
     markActive()
     updateDebug()
-  }, [enabled])
+    pruneOld(t)
+  }, [enabled, pruneOld])
 
   const onMouseDown = useCallback((e) => {
     if (!enabled) return
     const s = ref.current
-    s.clickCount += 1
-    s.mouseEvents.push([nowMs(), e.clientX, e.clientY, 1])
-    markActive(); updateDebug()
-  }, [enabled])
+    const t = nowPerf()
+    s.mouseEvents.push([t, e.clientX, e.clientY, 1])
+    markActive(); updateDebug(); pruneOld(t)
+  }, [enabled, pruneOld])
 
   const onWheel = useCallback((e) => {
     if (!enabled) return
     const s = ref.current
-    s.scrollCount += 1
-    s.mouseEvents.push([nowMs(), e.clientX ?? 0, e.clientY ?? 0, 2])
-    markActive(); updateDebug()
-  }, [enabled])
+    const t = nowPerf()
+    s.mouseEvents.push([t, e.clientX ?? 0, e.clientY ?? 0, 2])
+    markActive(); updateDebug(); pruneOld(t)
+  }, [enabled, pruneOld])
 
-  // Attach listeners
+  // Attach/detach listeners
   useEffect(() => {
     if (!enabled) return
-    resetWindow()
 
     document.addEventListener("keydown", onKeyDownDoc, { capture: true })
     document.addEventListener("keyup", onKeyUpDoc, { capture: true })
@@ -215,66 +174,115 @@ function useBehaviorTracker(enabled, setDebug) {
       document.removeEventListener("mousedown", onMouseDown, { capture: true })
       document.removeEventListener("wheel", onWheel, { capture: true })
     }
-  }, [enabled, onKeyDownDoc, onKeyUpDoc, onKeyDownWin, onKeyUpWin, onMouseMove, onMouseDown, onWheel, resetWindow])
+  }, [enabled, onKeyDownDoc, onKeyUpDoc, onKeyDownWin, onKeyUpWin, onMouseMove, onMouseDown, onWheel])
 
-  // ---------- build payload ----------
+  // ---------- build payload for the last WINDOW_MS ----------
   const snapshotFeatures = useCallback(() => {
     const s = ref.current
-    const now = performance.now()
+    const now = nowPerf()
+    const cut = now - WINDOW_MS
 
-    // aggregates → 17 features
-    const ks_mean_dwell_ms = s.dwellMs.length ? s.dwellMs.reduce((a,b)=>a+b,0) / s.dwellMs.length : 0
-    const ks_median_dwell_ms = quantile(s.dwellMs, 0.5)
-    const ks_p95_dwell_ms = quantile(s.dwellMs, 0.95)
+    // --- keyboard window ---
+    const keyPressesW = s.keyPresses.filter(p => (p.down_ts >= cut) || (p.up_ts != null && p.up_ts >= cut))
+    const downsW = keyPressesW.map(p => p.down_ts).sort((a,b)=>a-b)
+    const uniqueKeys = new Set(keyPressesW.map(p=>p.code))
+    const keydowns = keyPressesW.filter(p => p.down_ts >= cut).length
+    const keyups   = keyPressesW.filter(p => p.up_ts != null && p.up_ts >= cut).length
+    const eventCount = keydowns + keyups
 
-    const ks_mean_ikg_ms = s.ikgMs.length ? s.ikgMs.reduce((a,b)=>a+b,0) / s.ikgMs.length : 0
-    const ks_median_ikg_ms = quantile(s.ikgMs, 0.5)
-    const ks_p95_ikg_ms = quantile(s.ikgMs, 0.95)
+    // dwell list in-window
+    const dwellMs = keyPressesW.map(p => Math.max((p.up_ts ?? p.down_ts) - p.down_ts, 0))
+    const ks_mean_dwell_ms = dwellMs.length ? dwellMs.reduce((a,b)=>a+b,0) / dwellMs.length : 0
+    const ks_median_dwell_ms = quantile(dwellMs, 0.5)
+    const ks_p95_dwell_ms = quantile(dwellMs, 0.95)
 
-    const mouse_mean_speed_px_s = s.speeds.length ? s.speeds.reduce((a,b)=>a+b,0) / s.speeds.length : 0
-    const mouse_max_speed_px_s = s.maxSpeed
+    // ikg from downsW
+    let ikgMs = []
+    for (let i = 1; i < downsW.length; i++) {
+      const g = Math.max(downsW[i] - downsW[i-1], 0)
+      if (isFinite(g)) ikgMs.push(g)
+    }
+    const ks_mean_ikg_ms = ikgMs.length ? ikgMs.reduce((a,b)=>a+b,0) / ikgMs.length : 0
+    const ks_median_ikg_ms = quantile(ikgMs, 0.5)
+    const ks_p95_ikg_ms = quantile(ikgMs, 0.95)
 
-    const active_seconds_fraction = Math.min(1, s.activeSeconds.size / 30)
+    // --- mouse window ---
+    const mev = s.mouseEvents.filter(ev => ev[0] >= cut).sort((a,b)=>a[0]-b[0])
+    const moveCount = mev.filter(ev => ev[3] === 0).length
+    const clickCount = mev.filter(ev => ev[3] === 1).length
+    const scrollCount = mev.filter(ev => ev[3] === 2).length
 
-    // key_events: fill next_down_ts
-    const key_events = s.keyPresses
-      .filter(p => p.down_ts != null)            // valid presses
+    let totalDist = 0
+    let speeds = []
+    let maxSpeed = 0
+    for (let i = 1; i < mev.length; i++) {
+      const [t1, x1, y1, typ1] = mev[i]
+      const [t0, x0, y0, typ0] = mev[i-1]
+      const dt = (t1 - t0) / 1000
+      if (typ1 === 0 || typ0 === 0) {
+        const dist = Math.hypot((x1 - x0), (y1 - y0))
+        if (isFinite(dist)) totalDist += dist
+        if (dt > 0 && isFinite(dist)) {
+          const v = dist / dt
+          if (isFinite(v)) {
+            speeds.push(v)
+            if (v > maxSpeed) maxSpeed = v
+          }
+        }
+      }
+    }
+    const mouse_mean_speed_px_s = speeds.length ? speeds.reduce((a,b)=>a+b,0)/speeds.length : 0
+    const mouse_max_speed_px_s = maxSpeed
+
+    // activity seconds in-window
+    const secWindow = Math.ceil(WINDOW_MS / 1000)
+    const epochCut = nowEpochSec() - secWindow
+    const activeSecondsCount = [...s.activeSeconds].filter(sec => sec >= epochCut).length
+    const active_seconds_fraction = Math.min(1, activeSecondsCount / secWindow)
+
+    // fill next_down_ts for encoders
+    const key_events = keyPressesW
+      .filter(p => p.down_ts != null)
       .map(p => ({ down_ts: p.down_ts, up_ts: p.up_ts ?? p.down_ts }))
 
+    key_events.sort((a,b)=>a.down_ts - b.down_ts)
     for (let i = 0; i < key_events.length; i++) {
       const nd = (i + 1 < key_events.length) ? key_events[i + 1].down_ts : key_events[i].up_ts
       key_events[i].next_down_ts = nd
     }
 
-    // mouse_events: copy the list
-    const mouse_events = s.mouseEvents.slice()
+    const mouse_events = mev // already formatted [t,x,y,type]
 
     return {
-      ks_event_count: s.eventCount,
-      ks_keydowns: s.keydowns,
-      ks_keyups: s.keyups,
-      ks_unique_keys: s.uniqueKeys.size,
+      // 17 MVP features
+      ks_event_count: eventCount,
+      ks_keydowns: keydowns,
+      ks_keyups: keyups,
+      ks_unique_keys: uniqueKeys.size,
       ks_mean_dwell_ms,
       ks_median_dwell_ms,
       ks_p95_dwell_ms,
       ks_mean_ikg_ms,
       ks_median_ikg_ms,
       ks_p95_ikg_ms,
-      mouse_move_count: s.moveCount,
-      mouse_click_count: s.clickCount,
-      mouse_scroll_count: s.scrollCount,
-      mouse_total_distance_px: s.totalDist,
+      mouse_move_count: moveCount,
+      mouse_click_count: clickCount,
+      mouse_scroll_count: scrollCount,
+      mouse_total_distance_px: totalDist,
       mouse_mean_speed_px_s,
       mouse_max_speed_px_s,
       active_seconds_fraction: Number(active_seconds_fraction.toFixed(3)),
 
-      // NEW: sequences for encoders
+      // sequences for encoders
       key_events,
       mouse_events,
+
+      // optional: force personal head
+      head: "hybrid",
     }
   }, [])
 
-  return { snapshotFeatures, resetWindow }
+  return { snapshotFeatures }
 }
 
 // =================== PAGE ===================
@@ -289,7 +297,7 @@ export default function StressBehaviour() {
   const [debug, setDebug] = useState({ kd:0, ku:0, moves:0, clicks:0, scrolls:0, lastKey:"" })
   const sendTickRef = useRef(null)
 
-  const { snapshotFeatures, resetWindow } = useBehaviorTracker(tracking, setDebug)
+  const { snapshotFeatures } = useBehaviorTracker(tracking, setDebug)
 
   useEffect(() => { try { localStorage.setItem(LS_WINDOWS, JSON.stringify(windows.slice(0, 24))) } catch {} }, [windows])
   useEffect(() => { localStorage.setItem(LS_AUTO, JSON.stringify(auto)) }, [auto])
@@ -348,12 +356,12 @@ export default function StressBehaviour() {
   useEffect(() => {
     if (sendTickRef.current) clearInterval(sendTickRef.current)
     if (!tracking) return
+    // 5-second stride, overlapping 10s windows
     sendTickRef.current = setInterval(async () => {
       await sendWindowForPrediction()
-      resetWindow()
-    }, WINDOW_MS)
+    }, STEP_MS)
     return () => { if (sendTickRef.current) clearInterval(sendTickRef.current) }
-  }, [tracking, sendWindowForPrediction, resetWindow])
+  }, [tracking, sendWindowForPrediction])
 
   const manualSend = async () => { await sendWindowForPrediction() }
   const clearHistory = () => { setWindows([]); localStorage.removeItem(LS_WINDOWS) }
@@ -364,7 +372,6 @@ export default function StressBehaviour() {
     const arr = [...windows].reverse().map((w, i) => ({ idx: i + 1, smoothed: Math.round((w.smo || 0) * 1000) / 10 }))
     return arr
   }, [windows])
-
 
   return (
     <>
@@ -391,7 +398,7 @@ export default function StressBehaviour() {
             {health?.ok ? <Badge className="ml-2">Service OK</Badge> : <Badge variant="destructive" className="ml-2">Service Issue</Badge>}
           </div>
           <p className="text-sm text-muted-foreground">
-            Tracks keyboard & mouse dynamics in your browser and sends <b>exactly the 17 features</b> your model expects every 30 seconds.
+            Tracks keyboard &amp; mouse dynamics in your browser and sends <b>10-second windows</b> (with 5-second overlap) including sequences + 17 features to the hybrid model.
           </p>
         </div>
 
@@ -405,21 +412,16 @@ export default function StressBehaviour() {
             <div className="flex items-center gap-3 flex-wrap">
               <div className="flex items-center gap-2">
                 <Label htmlFor="track" className="text-sm">Tracking</Label>
-                <Switch id="track"
+                <Switch
+                  id="track"
                   checked={tracking}
                   onCheckedChange={setTracking}
                   tabIndex={-1}
                   onKeyDown={(e) => {
-                    if (e.code === "Space" || e.key === " ") {
-                      e.preventDefault();
-                      e.stopPropagation();
-                    }
+                    if (e.code === "Space" || e.key === " ") { e.preventDefault(); e.stopPropagation(); }
                   }}
                   onKeyUp={(e) => {
-                    if (e.code === "Space" || e.key === " ") {
-                      e.preventDefault();
-                      e.stopPropagation();
-                    }
+                    if (e.code === "Space" || e.key === " ") { e.preventDefault(); e.stopPropagation(); }
                   }}
                 />
                 <Button size="sm" variant={tracking ? "outline" : "default"} onClick={() => setTracking(t => !t)}>
@@ -451,7 +453,7 @@ export default function StressBehaviour() {
 
                 {/* Debug row */}
                 <div className="rounded-md border p-3">
-                  <div className="text-xs font-semibold mb-2">Live Counters (debug)</div>
+                  <div className="text-xs font-semibold mb-2">Live Counters (debug, last 10s)</div>
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
                     <div>Keydowns: <b>{debug.kd}</b></div>
                     <div>Keyups: <b>{debug.ku}</b></div>
@@ -460,11 +462,6 @@ export default function StressBehaviour() {
                     <div>Scrolls: <b>{debug.scrolls}</b></div>
                     <div>Last key: <b>{debug.lastKey || "—"}</b></div>
                   </div>
-                  {!hasFocus && (
-                    <div className="mt-2 text-xs text-yellow-700">
-                      Tip: This tab is not focused. Click anywhere on the page, then type again.
-                    </div>
-                  )}
                   {err && (
                     <div className="mt-2 flex items-center gap-2 text-sm text-red-600">
                       <AlertTriangle className="h-4 w-4" />
@@ -525,7 +522,7 @@ export default function StressBehaviour() {
                 {!windows.length && (
                   <TableRow>
                     <TableCell colSpan={6} className="text-center text-muted-foreground">
-                      No predictions yet. Turn on <b>Tracking</b>, ensure this tab is focused, and type/move/scroll.
+                      No predictions yet. Turn on <b>Tracking</b>, keep this tab focused, and type/move/scroll.
                     </TableCell>
                   </TableRow>
                 )}

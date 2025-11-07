@@ -12,7 +12,6 @@ from services.stress_behavior_service import (
     init_service as behavior_init_service,
     health_check as behavior_health_check,
     predict_from_row as behavior_predict_from_row,
-    # train_user_calibrator as behavior_train_user_calibrator,
     latest_window_features as behavior_latest_window_features
 )
 
@@ -68,7 +67,6 @@ def login():
     return login_user(data)
 
 
-
 # -------- Keyboard tracker--------
 @app.route("/api/start_tracking", methods=["POST"])
 def start_tracking_route():
@@ -79,44 +77,43 @@ def stop_tracking_route():
     return stop_tracking()
 
 
-
 # -------- Stress Face Detection  --------
 @app.route("/api/stress/face/health", methods=["GET"])
 @jwt_required(optional=True)
 def stress_face_health():
-    # If you want to gate by login, switch to @jwt_required() above.
     return face_health()
 
 @app.route("/api/stress/face/predict", methods=["POST"])
 @jwt_required(optional=True)
 def stress_face_predict():
-    # Logged-in user id (or None if guest)
     uid = get_jwt_identity()
-    # You can store per-user analytics here if desired.
-    # e.g., log user id + timestamp + confidence, etc.
     return face_predict(request)  # returns (json, status)
 
 
-
-# -------- Stress Behavior (keyboard/mouse) - NEW (JWT optional) --------
+# -------- Stress Behavior (keyboard/mouse) --------
 @app.route("/api/stress/behavior/health", methods=["GET"])
 @jwt_required(optional=True)
 def stress_behavior_health():
-    # Lightweight check of artifacts & feature list
     return jsonify(behavior_health_check())
 
 @app.route("/api/stress/behavior/predict", methods=["POST"])
 @jwt_required(optional=True)
 def stress_behavior_predict():
     """
-    Body JSON (30s window). Back-compat:
-      - 17-feature MVP fields (same as meta.feature_names)
+    POST body JSON (10s window recommended; 30s also works). Back-compat fields:
+      - 17-feature MVP fields (same names as training)
+      - Optional: has_mouse_emb, has_keys_emb (0/1)
 
-    NEW (optional, for embeddings):
-      - "mouse_seq": [[dx, dy, dt, speed, accel], ...]   # or "mouse_events": [[t,x,y,type], ...]
-      - "key_seq":   [[dwell, flight, delta_t], ...]     # or "key_events": [{"down_ts":..,"up_ts":..,"next_down_ts":..}, ...]
+    NEW (for embeddings via backend encoders):
+      - "mouse_events": [[t_ms, x, y, type], ...]   # type: 0 move, 1 click, 2 scroll
+        or "mouse_seq": [[dx, dy, dt, speed, accel, type01], ...]  # already derived
+      - "key_events": [{"down_ts":..,"up_ts":..,"next_down_ts":..}, ...]
+        or "key_seq": [[dwell_ms, flight_ms, ikg_ms], ...]
 
-    Also optional:
+    Optional selector:
+      - "head": "emb" | "hybrid"   # force a particular personal head; default = auto
+
+    Optional:
       - "user_id": "harsh"
     """
     try:
@@ -129,28 +126,12 @@ def stress_behavior_predict():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
-# @app.route("/api/stress/behavior/calibrate", methods=["POST"])
-# @jwt_required(optional=True)
-# def stress_behavior_calibrate():
-#     """
-#     Fits a per-user Platt calibrator from labels/stress_30s.csv.
-#     Body JSON: { "user_id": "harsh", "min_rows": 200 }  # both optional
-#     """
-#     try:
-#         body = request.get_json(silent=True) or {}
-#         user_id = str(body.get("user_id") or (get_jwt_identity() or "harsh"))
-#         min_rows = int(body.get("min_rows") or 200)
-#         path = behavior_train_user_calibrator(user_id=user_id, min_rows=min_rows)
-#         return jsonify({"ok": True, "user_id": user_id, "calibrator_path": path}), 200
-#     except Exception as e:
-#         return jsonify({"ok": False, "error": str(e)}), 400
-    
 @app.route("/api/stress/behavior/latest-window", methods=["GET"])
 @jwt_required(optional=True)
 def stress_behavior_latest_window():
     """
-    Returns the latest 30s aggregate features (keys match training features),
-    sourced from labels/stress_30s.csv.
+    Returns the latest aggregate MVP features from your labels CSV
+    (prefers stress_hybrid_10s.csv; falls back to stress_30s.csv).
     """
     try:
         uid = get_jwt_identity()
@@ -175,15 +156,11 @@ def create_chat():
     is_journal = bool(body.get("is_journal", False))
 
     if is_journal:
-        # one journal per user
         existing = Chat.query.filter_by(user_id=user_id, is_journal=True).first()
         if existing:
             return jsonify({"chat_id": existing.id, "title": existing.title, "is_journal": True}), 200
 
-    # ✅ New logic: if this is a normal chat with no provided title,
-    # and the user already has an EMPTY chat (0 messages), reuse it.
     if not is_journal and title is None:
-        # newest first
         candidates = (
             Chat.query
             .filter_by(user_id=user_id, is_journal=False)
@@ -194,12 +171,10 @@ def create_chat():
             .all()
         )
         for c in candidates:
-            # Count messages for this chat; reuse the first empty one.
             msg_count = ChatMessage.query.filter_by(chat_id=c.id).count()
             if msg_count == 0:
                 return jsonify({"chat_id": c.id, "title": c.title, "is_journal": c.is_journal}), 200
 
-    # Otherwise create a new chat
     chat = Chat(user_id=user_id, title=title, is_journal=is_journal)
     db.session.add(chat)
     db.session.commit()
@@ -214,7 +189,6 @@ def list_chats():
         user_id = int(uid) if uid is not None else None
     except ValueError:
         return jsonify({"error": "Invalid token"}), 401
-    print(user_id)
     rows = (
         Chat.query
         .filter_by(user_id=user_id)
@@ -224,7 +198,6 @@ def list_chats():
         )
         .all()
     )
-
     out = []
     for c in rows:
         out.append({
@@ -269,7 +242,6 @@ def delete_chat(chat_id: int):
     chat = Chat.query.filter_by(id=chat_id, user_id=user_id).first()
     if not chat:
         return jsonify({"error": "Chat not found"}), 404
-    # hard delete (simple)
     ChatMessage.query.filter_by(chat_id=chat_id).delete()
     ChatSummary.query.filter_by(chat_id=chat_id).delete()
     db.session.delete(chat)
@@ -320,14 +292,12 @@ def upsert_profile_memory():
 
 
 # -------- Chatbot (JSON & SSE) --------
-# JSON (backward compatible). If logged in + chat_id -> persists. Else requires session_id (guest).
 @app.route("/api/chatbot", methods=["POST"])
 @jwt_required(optional=True)
 def chatbot_route():
     data = request.get_json()
     return chat_with_bot(data)  # returns (json, status)
 
-# SSE: now accepts chat_id OR session_id; if JWT present and chat_id provided => persists
 @app.route("/api/chatbot/stream", methods=["GET"])
 @jwt_required(optional=True)
 def chatbot_stream_route():
@@ -335,12 +305,11 @@ def chatbot_stream_route():
     try:
         user_id = int(uid) if uid is not None else None
     except ValueError:
-        user_id = None  # None if not logged in
+        user_id = None
     session_id = request.args.get("session_id", "")
     chat_id = request.args.get("chat_id", "")
     chat_id = int(chat_id) if (chat_id and chat_id.isdigit()) else None
     user_message = request.args.get("message", "")
-
     return Response(stream_with_context(
         sse_stream(user_id, chat_id, session_id, user_message)
     ), headers={
@@ -350,7 +319,6 @@ def chatbot_stream_route():
         "Connection": "keep-alive",
     })
 
-# Ephemeral reset remains for guest sessions
 @app.route("/api/chatbot/reset", methods=["POST"])
 def chatbot_reset_route():
     data = request.get_json()
