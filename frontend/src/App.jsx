@@ -8,10 +8,9 @@ import Login from './pages/Login';
 import SignUp from './pages/SignUp';
 import StressDetection from './pages/StressDetection';
 import PanicSOSChatbot from './pages/PanicSOSChatbot';
-import RelaxationTherapyPage from './pages/RelaxationTherapyPage';
 import ContactPage from './pages/ContactPage';
-import TrackUserMovements from './pages/TrackUserMovements';
-import StressBehaviour from './pages/StressBehaviour';
+import BreathingCoach from './pages/BreathingCoach';
+import FocusCompanion from './pages/FocusCompanion';
 
 function App() {
 	return (
@@ -25,9 +24,8 @@ function App() {
 				<Route path="/signup" element={<SignUp/>}/>
 				<Route path="/stress-detection" element={<StressDetection/>}/>
 				<Route path="/panic-chatbot" element={<PanicSOSChatbot/>}/>
-				<Route path="/music-relaxation" element={<RelaxationTherapyPage/>}/>
-				<Route path="/track-movements" element={<TrackUserMovements/>}/>
-				<Route path="/stress-behavior" element={<StressBehaviour />} />
+				<Route path="/breathing-coach" element={<BreathingCoach/>}/>
+				<Route path="/focus" element={<FocusCompanion/>}/>
 			</Routes>
 		</Router>
 	)

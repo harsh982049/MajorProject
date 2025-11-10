@@ -37,3 +37,4 @@ Thumbs.db
 # --- Git ---
 backend/export/face_emotion_pt.onnx
 backend/best_model.pth
+backend/client_secret.json

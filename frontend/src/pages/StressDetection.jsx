@@ -298,14 +298,12 @@ function StressDetection() {
                   </p>
                 </CardContent>
               </Card>
-
               <Card>
                 <CardHeader>
                   <CardTitle>Personalized Suggestion</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <p className="text-lg">{getSuggestion()}</p>
-
+                  <p className="text-lg">{getSuggestion()}</p>    
                   {stressLevel === "High" && (
                     <motion.div
                       className="mt-4 flex justify-center"
@@ -319,13 +317,6 @@ function StressDetection() {
                         className="bg-red-600 hover:bg-red-700 text-white mr-4"
                       >
                         <AlertCircle className="mr-2 h-5 w-5" /> Panic SOS
-                      </Button>
-                      <Button
-                        onClick={() => navigate("/music-therapy")}
-                        size="lg"
-                        className="bg-green-600 hover:bg-green-700 text-white"
-                      >
-                        <Music className="mr-2 h-5 w-5" /> Music Therapy
                       </Button>
                     </motion.div>
                   )}
